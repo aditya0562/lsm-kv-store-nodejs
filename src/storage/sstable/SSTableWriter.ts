@@ -1,15 +1,3 @@
-/**
- * SSTable Writer Implementation
- * Write Process:
- * 1. Accumulate entries in memory (sorted order required)
- * 2. Write to temp file: sstable-XXXXX.sst.tmp
- * 3. Build sparse index while writing
- * 4. Write index section
- * 5. Write footer with metadata
- * 6. fsync for durability
- * 7. Atomic rename: .tmp → .sst
- */
-
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { 
@@ -21,6 +9,7 @@ import {
 } from './SSTableTypes';
 import { ISSTableWriter } from './ISSTableWriter';
 import { SSTableSerializer } from './SSTableSerializer';
+import { BloomFilter } from './BloomFilter';
 
 export class SSTableWriter implements ISSTableWriter {
   private readonly fileNumber: number;
@@ -80,8 +69,15 @@ export class SSTableWriter implements ISSTableWriter {
       let currentOffset = 0;
       const dataOffset = 0;
 
+      const bloomFilter = BloomFilter.create({
+        expectedItems: this.entries.length,
+        falsePositiveRate: this.config.bloomFilterFalsePositiveRate,
+      });
+
       for (let i = 0; i < this.entries.length; i++) {
         const entry = this.entries[i]!;
+
+        bloomFilter.add(entry.key);
 
         if (i % this.config.sparseIndexInterval === 0) {
           this.sparseIndex.push({ key: entry.key, offset: currentOffset });
@@ -105,6 +101,11 @@ export class SSTableWriter implements ISSTableWriter {
         currentOffset += indexBuffer.length;
       }
 
+      const bloomFilterOffset = currentOffset;
+      const bloomFilterBuffer = bloomFilter.serialize();
+      await handle.write(bloomFilterBuffer);
+      currentOffset += bloomFilterBuffer.length;
+
       const firstKey = this.entries[0]!.key;
       const lastKey = this.entries[this.entries.length - 1]!.key;
       const createdAt = Date.now();
@@ -114,6 +115,7 @@ export class SSTableWriter implements ISSTableWriter {
         this.entries.length,
         dataOffset,
         indexOffset,
+        bloomFilterOffset,
         firstKey,
         lastKey,
         createdAt
@@ -137,6 +139,7 @@ export class SSTableWriter implements ISSTableWriter {
         createdAt,
         indexOffset,
         dataOffset,
+        bloomFilterOffset,
       };
 
       return metadata;
@@ -150,7 +153,7 @@ export class SSTableWriter implements ISSTableWriter {
 
   public async abort(): Promise<void> {
     await this.cleanupTempFile();
-    this.built = true; // Prevent further use
+    this.built = true;
   }
 
   private formatFileName(fileNumber: number): string {

@@ -9,7 +9,7 @@ import * as path from 'path';
 import { WAL } from './wal/WAL';
 import { LogOperationType, LogEntry } from './wal/LogEntry';
 import { MemTable } from './memtable/MemTable';
-import { StorageConfig } from '../common/Config';
+import { StorageConfig, SSTableTuning, resolveSSTableTuning } from '../common/Config';
 import { IStorageEngine, IWAL, IMemTable, KVPair, RangeQueryOptions } from '../interfaces/Storage';
 import { 
   SSTableWriter, 
@@ -44,6 +44,7 @@ export class LSMStore implements IStorageEngine {
   private readonly wal: IWAL;
   private readonly manifest: IManifest;
   private readonly sstableDir: string;
+  private readonly sstableTuning: SSTableTuning;
   
   private activeMemTable: IMemTable;
   private immutableMemTable: IMemTable | null = null;
@@ -65,6 +66,7 @@ export class LSMStore implements IStorageEngine {
   constructor(config: StorageConfig, dependencies?: Partial<LSMStoreDependencies>) {
     this.config = config;
     this.sstableDir = path.join(config.dataDir, 'sstables');
+    this.sstableTuning = resolveSSTableTuning(config.sstableTuning);
     this.useCompaction = config.enableCompaction !== false;
     
     const walDir = path.join(config.dataDir, 'wal');
@@ -114,6 +116,7 @@ export class LSMStore implements IStorageEngine {
           sstableDir: this.sstableDir,
           threshold: 4,
           checkIntervalMs: 60_000,
+          sstableTuning: this.sstableTuning,
         }
       );
     }
@@ -385,6 +388,8 @@ export class LSMStore implements IStorageEngine {
 
     const writer = new SSTableWriter(fileNumber, {
       dataDir: this.sstableDir,
+      sparseIndexInterval: this.sstableTuning.sparseIndexInterval,
+      bloomFilterFalsePositiveRate: this.sstableTuning.bloomFilterFalsePositiveRate,
     });
 
     for (const { key, entry } of entries) {

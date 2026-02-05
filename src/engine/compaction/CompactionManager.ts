@@ -14,11 +14,10 @@ import {
   CompactionStats,
   DEFAULT_COMPACTION_CONFIG,
 } from './CompactionTypes';
-
+import { SSTableTuning, DEFAULT_SSTABLE_TUNING } from '../../common/Config';
 
 export interface CompactionManagerDependencies {
   readonly manifest: IManifest;
-  
   readonly onComplete: CompactionCompleteCallback;
 }
 
@@ -37,19 +36,17 @@ export class CompactionManager implements ICompactionManager {
   private totalEntriesRemoved: number = 0;
   private lastCompactionTime: number | null = null;
 
-  /**
-   * Create a CompactionManager.
-   * 
-   * @param dependencies - Required dependencies (manifest, callback)
-   * @param config - Optional configuration overrides
-   */
   constructor(
     dependencies: CompactionManagerDependencies,
-    config?: Partial<CompactionConfig>
+    config?: Partial<Omit<CompactionConfig, 'sstableTuning'>> & { sstableTuning?: Partial<SSTableTuning> }
   ) {
     this.manifest = dependencies.manifest;
     this.onComplete = dependencies.onComplete;
-    this.config = { ...DEFAULT_COMPACTION_CONFIG, ...config };
+    this.config = {
+      ...DEFAULT_COMPACTION_CONFIG,
+      ...config,
+      sstableTuning: { ...DEFAULT_SSTABLE_TUNING, ...config?.sstableTuning },
+    };
   }
 
   public start(): void {
@@ -80,12 +77,7 @@ export class CompactionManager implements ICompactionManager {
     }
 
     if (this.currentCompaction) {
-      console.log('CompactionManager: Waiting for in-progress compaction...');
-      try {
-        await this.currentCompaction;
-      } catch (error) {
-        console.error('CompactionManager: Error during shutdown compaction:', error);
-      }
+      await this.currentCompaction;
     }
 
     console.log('CompactionManager: Stopped');
@@ -93,12 +85,17 @@ export class CompactionManager implements ICompactionManager {
 
   public async triggerCompaction(): Promise<CompactionResult | null> {
     if (this.compacting) {
-      console.log('CompactionManager: Compaction already in progress, skipping');
+      return this.currentCompaction;
+    }
+
+    const state = this.manifest.getState();
+    if (state.sstables.length < 2) {
       return null;
     }
 
     return this.doCompaction();
   }
+
 
   public isCompacting(): boolean {
     return this.compacting;
@@ -115,51 +112,43 @@ export class CompactionManager implements ICompactionManager {
   }
 
   private checkAndTrigger(): void {
-    if (!this.shouldCompact()) {
+    if (this.compacting || !this.running) {
       return;
     }
 
-    this.currentCompaction = this.doCompaction()
-      .catch(error => {
-        console.error('CompactionManager: Compaction failed:', error);
-        return null;
-      })
-      .finally(() => {
-        this.currentCompaction = null;
+    const state = this.manifest.getState();
+    if (state.sstables.length >= this.config.threshold) {
+      this.doCompaction().catch(err => {
+        console.error('CompactionManager: Background compaction failed:', err);
       });
+    }
   }
 
-  private shouldCompact(): boolean {
+  private async doCompaction(): Promise<CompactionResult | null> {
     if (this.compacting) {
-      return false;
+      return this.currentCompaction;
     }
 
-    const sstables = this.manifest.getSSTables();
-    return sstables.length >= this.config.threshold;
+    this.compacting = true;
+    this.currentCompaction = this.executeCompaction();
+
+    try {
+      return await this.currentCompaction;
+    } finally {
+      this.compacting = false;
+      this.currentCompaction = null;
+    }
   }
 
-  /**
-   * Perform the actual compaction.
-   * 
-   * Algorithm:
-   * 1. Snapshot current SSTables
-   * 2. Open readers for all SSTables
-   * 3. Merge using MergeIterator (dedup + remove tombstones)
-   * 4. Write to new SSTable
-   * 5. Update manifest atomically
-   * 6. Notify LSMStore via callback
-   * 7. Delete old SSTable files
-   */
-  private async doCompaction(): Promise<CompactionResult | null> {
+  private async executeCompaction(): Promise<CompactionResult | null> {
     const startTime = Date.now();
-    
-    const sstableMetas = this.manifest.getSSTables();
-    
+    const state = this.manifest.getState();
+    const sstableMetas = [...state.sstables];
+
     if (sstableMetas.length < 2) {
       return null;
     }
 
-    this.compacting = true;
     console.log(`CompactionManager: Starting compaction of ${sstableMetas.length} SSTables`);
 
     try {
@@ -177,6 +166,8 @@ export class CompactionManager implements ICompactionManager {
       const newFileNumber = this.manifest.getNextFileNumber();
       const writer = new SSTableWriter(newFileNumber, {
         dataDir: this.config.sstableDir,
+        sparseIndexInterval: this.config.sstableTuning.sparseIndexInterval,
+        bloomFilterFalsePositiveRate: this.config.sstableTuning.bloomFilterFalsePositiveRate,
       });
 
       let entriesWritten = 0;
@@ -214,38 +205,45 @@ export class CompactionManager implements ICompactionManager {
       console.log(`CompactionManager: New SSTable ${newFileNumber} created with ${entriesWritten} entries`);
 
       const compactedFileNumbers = sstableMetas.map(m => m.fileNumber);
-      await this.manifest.applyEdit({
-        addedSSTables: [newMetadata],
-        removedFileNumbers: compactedFileNumbers,
-        nextFileNumber: newFileNumber + 1,
-      });
-
-      const entriesRemoved = totalEntriesRead - entriesWritten;
-      const durationMs = Date.now() - startTime;
+      
+      await this.manifest.addSSTable(newMetadata);
+      await this.manifest.removeSSTables(compactedFileNumbers);
 
       const result: CompactionResult = {
         newSSTable: newMetadata,
         compactedFileNumbers,
         entriesWritten,
-        entriesRemoved,
-        durationMs,
+        entriesRemoved: totalEntriesRead - entriesWritten,
+        durationMs: Date.now() - startTime,
       };
-
-      await this.onComplete(result);
 
       await this.deleteOldFiles(sstableMetas);
 
-      this.updateStats(entriesWritten, entriesRemoved, durationMs);
+      this.updateStats(entriesWritten, totalEntriesRead - entriesWritten, result.durationMs);
 
-      console.log(
-        `CompactionManager: Compaction complete in ${durationMs}ms. ` +
-        `${sstableMetas.length} files → 1 file. ` +
-        `${entriesWritten} entries kept, ${entriesRemoved} removed.`
-      );
+      await this.onComplete(result);
 
       return result;
-    } finally {
-      this.compacting = false;
+
+    } catch (error) {
+      console.error('CompactionManager: Compaction failed:', error);
+      throw error;
+    }
+  }
+
+  private updateStats(entriesCompacted: number, entriesRemoved: number, durationMs: number): void {
+    this.totalCompactions++;
+    this.totalEntriesCompacted += entriesCompacted;
+    this.totalEntriesRemoved += entriesRemoved;
+    this.lastCompactionTime = Date.now();
+  }
+
+  private async deleteOldFiles(metas: SSTableMetadata[]): Promise<void> {
+    for (const meta of metas) {
+      try {
+        await fs.unlink(meta.filePath);
+      } catch {
+      }
     }
   }
 
@@ -258,23 +256,5 @@ export class CompactionManager implements ICompactionManager {
         deleted: entry.deleted,
       };
     }
-  }
-
-  private async deleteOldFiles(sstables: SSTableMetadata[]): Promise<void> {
-    for (const meta of sstables) {
-      try {
-        await fs.unlink(meta.filePath);
-        console.log(`CompactionManager: Deleted ${meta.filePath}`);
-      } catch (error) {
-        console.warn(`CompactionManager: Failed to delete ${meta.filePath}:`, error);
-      }
-    }
-  }
-
-  private updateStats(entriesWritten: number, entriesRemoved: number, durationMs: number): void {
-    this.totalCompactions++;
-    this.totalEntriesCompacted += entriesWritten;
-    this.totalEntriesRemoved += entriesRemoved;
-    this.lastCompactionTime = Date.now();
   }
 }

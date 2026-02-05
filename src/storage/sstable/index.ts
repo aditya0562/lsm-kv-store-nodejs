@@ -13,7 +13,9 @@ export {
 
 export type { ISSTableWriter } from './ISSTableWriter';
 export type { ISSTableReader, SSTableIteratorResult } from './ISSTableReader';
+export type { IBloomFilter, BloomFilterConfig } from './IBloomFilter';
 
 export { SSTableWriter } from './SSTableWriter';
 export { SSTableReader } from './SSTableReader';
 export { SSTableSerializer } from './SSTableSerializer';
+export { BloomFilter } from './BloomFilter';

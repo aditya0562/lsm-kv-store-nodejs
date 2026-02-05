@@ -1,4 +1,3 @@
-
 import { SSTableEntry, IndexEntry, SSTABLE_MAGIC, SSTABLE_VERSION } from './SSTableTypes';
 
 export class SSTableSerializer {
@@ -101,10 +100,8 @@ export class SSTableSerializer {
   }
 
   /**
-   * Serialize the SSTable footer.
-   * 
-   * Footer format (can be read by knowing footerSize at end):
-   * [fileNumber:4][entryCount:4][dataOffset:8][indexOffset:8]
+   * Footer format (v2 with bloom filter):
+   * [fileNumber:4][entryCount:4][dataOffset:8][indexOffset:8][bloomFilterOffset:8]
    * [firstKeyLen:2][firstKey:N][lastKeyLen:2][lastKey:M]
    * [createdAt:8][version:2][footerSize:4][magic:4]
    */
@@ -113,6 +110,7 @@ export class SSTableSerializer {
     entryCount: number,
     dataOffset: number,
     indexOffset: number,
+    bloomFilterOffset: number,
     firstKey: string,
     lastKey: string,
     createdAt: number
@@ -120,7 +118,7 @@ export class SSTableSerializer {
     const firstKeyBuf = Buffer.from(firstKey, 'utf8');
     const lastKeyBuf = Buffer.from(lastKey, 'utf8');
     
-    const totalSize = 46 + firstKeyBuf.length + lastKeyBuf.length;
+    const totalSize = 54 + firstKeyBuf.length + lastKeyBuf.length;
     const buffer = Buffer.allocUnsafe(totalSize);
     
     let offset = 0;
@@ -135,6 +133,9 @@ export class SSTableSerializer {
     offset += 8;
     
     buffer.writeBigUInt64BE(BigInt(indexOffset), offset);
+    offset += 8;
+    
+    buffer.writeBigUInt64BE(BigInt(bloomFilterOffset), offset);
     offset += 8;
     
     buffer.writeUInt16BE(firstKeyBuf.length, offset);
@@ -166,12 +167,6 @@ export class SSTableSerializer {
   public static calculateFooterSize(firstKey: string, lastKey: string): number {
     const firstKeyLen = Buffer.byteLength(firstKey, 'utf8');
     const lastKeyLen = Buffer.byteLength(lastKey, 'utf8');
-    return 46 + firstKeyLen + lastKeyLen; // 46 = fixed fields including footerSize
-  }
-
-  public static validateMagic(buffer: Buffer): boolean {
-    if (buffer.length < 4) return false;
-    const magic = buffer.readUInt32BE(buffer.length - 4);
-    return magic === SSTABLE_MAGIC;
+    return 54 + firstKeyLen + lastKeyLen;
   }
 }

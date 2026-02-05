@@ -9,12 +9,15 @@ import {
 } from './SSTableTypes';
 import { ISSTableReader } from './ISSTableReader';
 import { SSTableSerializer } from './SSTableSerializer';
+import { BloomFilter } from './BloomFilter';
+import { IBloomFilter } from './IBloomFilter';
 
 interface ReaderState {
   readonly handle: FileHandle;
   readonly fileSize: number;
   readonly metadata: SSTableMetadata;
   readonly sparseIndex: IndexEntry[];
+  readonly bloomFilter: IBloomFilter | null;
 }
 
 export class SSTableReader implements ISSTableReader {
@@ -43,14 +46,15 @@ export class SSTableReader implements ISSTableReader {
       const fileSize = stats.size;
 
       const metadata = await this.readFooter(handle, fileSize);
-      
-      const sparseIndex = await this.loadSparseIndex(handle, metadata.indexOffset, fileSize);
+      const sparseIndex = await this.loadSparseIndex(handle, metadata.indexOffset);
+      const bloomFilter = await this.loadBloomFilter(handle, metadata);
 
       this.state = {
         handle,
         fileSize,
         metadata,
         sparseIndex,
+        bloomFilter,
       };
 
     } catch (error) {
@@ -77,14 +81,6 @@ export class SSTableReader implements ISSTableReader {
     return this.state!.metadata;
   }
 
-  /**
-   * Point lookup using sparse index + sequential scan.
-   * 
-   * Algorithm:
-   * 1. Binary search sparse index for largest key ≤ target
-   * 2. Seek to that offset
-   * 3. Sequential scan until found or past target
-   */
   public async get(key: string): Promise<SSTableEntry | null> {
     this.ensureOpen();
     const { metadata, sparseIndex, handle } = this.state!;
@@ -115,9 +111,19 @@ export class SSTableReader implements ISSTableReader {
     return null;
   }
 
-
   public mayContain(key: string): boolean {
-    return this.isInRange(key);
+    this.ensureOpen();
+    
+    if (!this.isInRange(key)) {
+      return false;
+    }
+
+    const { bloomFilter } = this.state!;
+    if (bloomFilter !== null) {
+      return bloomFilter.mightContain(key);
+    }
+
+    return true;
   }
 
   public isInRange(key: string): boolean {
@@ -160,16 +166,7 @@ export class SSTableReader implements ISSTableReader {
     }
   }
 
-  /**
-   * Read and parse the SSTable footer.
-   * 
-   * Footer format (with footerSize for easy parsing):
-   * [fileNumber:4][entryCount:4][dataOffset:8][indexOffset:8]
-   * [firstKeyLen:2][firstKey:N][lastKeyLen:2][lastKey:M]
-   * [createdAt:8][version:2][footerSize:4][magic:4]
-   */
   protected async readFooter(handle: FileHandle, fileSize: number): Promise<SSTableMetadata> {
-    // Read last 8 bytes: [footerSize:4][magic:4]
     const tailBuf = Buffer.allocUnsafe(8);
     await handle.read(tailBuf, 0, 8, fileSize - 8);
     
@@ -177,7 +174,7 @@ export class SSTableReader implements ISSTableReader {
     const magic = tailBuf.readUInt32BE(4);
     
     if (magic !== SSTABLE_MAGIC) {
-      throw new Error(`SSTableReader: Invalid magic number (got 0x${magic.toString(16)}, expected 0x${SSTABLE_MAGIC.toString(16)}) in ${this.filePath}`);
+      throw new Error(`SSTableReader: Invalid magic number in ${this.filePath}`);
     }
     
     if (footerSize > fileSize || footerSize < 46) {
@@ -201,6 +198,14 @@ export class SSTableReader implements ISSTableReader {
     
     const indexOffset = Number(footerBuf.readBigUInt64BE(pos));
     pos += 8;
+
+    const version = footerBuf.readUInt16BE(footerSize - 10);
+    
+    let bloomFilterOffset: number | undefined;
+    if (version >= 2) {
+      bloomFilterOffset = Number(footerBuf.readBigUInt64BE(pos));
+      pos += 8;
+    }
     
     const firstKeyLen = footerBuf.readUInt16BE(pos);
     pos += 2;
@@ -215,12 +220,6 @@ export class SSTableReader implements ISSTableReader {
     pos += lastKeyLen;
     
     const createdAt = Number(footerBuf.readBigUInt64BE(pos));
-    pos += 8;
-    
-    const version = footerBuf.readUInt16BE(pos);
-    if (version !== SSTABLE_VERSION) {
-      throw new Error(`SSTableReader: Unsupported version ${version} in ${this.filePath}`);
-    }
 
     return {
       fileNumber,
@@ -232,79 +231,37 @@ export class SSTableReader implements ISSTableReader {
       createdAt,
       indexOffset,
       dataOffset,
+      ...(bloomFilterOffset !== undefined && { bloomFilterOffset }),
     };
   }
 
-  private async parseFooterFromEnd(handle: FileHandle, fileSize: number): Promise<SSTableMetadata> {
-    const tailBuf = Buffer.allocUnsafe(8);
-    await handle.read(tailBuf, 0, 8, fileSize - 8);
-    
-    const footerSize = tailBuf.readUInt32BE(0);
-    const magic = tailBuf.readUInt32BE(4);
-    
-    if (magic !== SSTABLE_MAGIC) {
-      throw new Error(`SSTableReader: Invalid magic number (got ${magic.toString(16)}, expected ${SSTABLE_MAGIC.toString(16)})`);
-    }
-    
-    if (footerSize > fileSize || footerSize < 46) {
-      throw new Error(`SSTableReader: Invalid footer size ${footerSize}`);
-    }
-    
-    const footerStart = fileSize - footerSize;
-    const footerBuf = Buffer.allocUnsafe(footerSize);
-    await handle.read(footerBuf, 0, footerSize, footerStart);
-    
-    let pos = 0;
-    
-    const fileNumber = footerBuf.readUInt32BE(pos);
-    pos += 4;
-    
-    const entryCount = footerBuf.readUInt32BE(pos);
-    pos += 4;
-    
-    const dataOffset = Number(footerBuf.readBigUInt64BE(pos));
-    pos += 8;
-    
-    const indexOffset = Number(footerBuf.readBigUInt64BE(pos));
-    pos += 8;
-    
-    const firstKeyLen = footerBuf.readUInt16BE(pos);
-    pos += 2;
-    
-    const firstKey = footerBuf.toString('utf8', pos, pos + firstKeyLen);
-    pos += firstKeyLen;
-    
-    const lastKeyLen = footerBuf.readUInt16BE(pos);
-    pos += 2;
-    
-    const lastKey = footerBuf.toString('utf8', pos, pos + lastKeyLen);
-    pos += lastKeyLen;
-    
-    const createdAt = Number(footerBuf.readBigUInt64BE(pos));
-    pos += 8;
-    
-    const version = footerBuf.readUInt16BE(pos);
-    if (version !== SSTABLE_VERSION) {
-      throw new Error(`SSTableReader: Unsupported version ${version}`);
+  private async loadBloomFilter(
+    handle: FileHandle, 
+    metadata: SSTableMetadata
+  ): Promise<IBloomFilter | null> {
+    if (metadata.bloomFilterOffset === undefined) {
+      return null;
     }
 
-    return {
-      fileNumber,
-      filePath: this.filePath,
-      entryCount,
-      firstKey,
-      lastKey,
-      fileSize,
-      createdAt,
-      indexOffset,
-      dataOffset,
-    };
+    const footerStart = metadata.fileSize - SSTableSerializer.calculateFooterSize(
+      metadata.firstKey, 
+      metadata.lastKey
+    );
+    const bloomFilterSize = footerStart - metadata.bloomFilterOffset;
+
+    if (bloomFilterSize <= 0) {
+      return null;
+    }
+
+    const bloomBuf = Buffer.allocUnsafe(bloomFilterSize);
+    await handle.read(bloomBuf, 0, bloomFilterSize, metadata.bloomFilterOffset);
+
+    return BloomFilter.fromBuffer(bloomBuf);
   }
 
   protected async loadSparseIndex(
     handle: FileHandle, 
-    indexOffset: number,
-    fileSize: number
+    indexOffset: number
   ): Promise<IndexEntry[]> {
     const index: IndexEntry[] = [];
 
