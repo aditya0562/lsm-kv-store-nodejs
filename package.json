@@ -11,7 +11,8 @@
     "test:unit": "jest tests/unit",
     "test:integration": "jest tests/integration",
     "test:perf": "ts-node scripts/bench.ts",
-    "clean": "rm -rf dist data"
+    "test:features": "ts-node scripts/test-features.ts",
+    "clean": "rm -rf dist data data-test"
   },
   "repository": {
     "type": "git",

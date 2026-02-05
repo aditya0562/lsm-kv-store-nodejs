@@ -55,25 +55,16 @@ export class ApplicationBuilder {
     this.config = config;
   }
   
-  /**
-   * Use custom factory (for testing)
-   */
   withFactory(factory: IStorageFactory): ApplicationBuilder {
     this.factory = factory;
     return this;
   }
   
-  /**
-   * Use custom dependencies (for testing)
-   */
   withDependencies(deps: Partial<LSMStoreDependencies>): ApplicationBuilder {
     this.dependencies = deps;
     return this;
   }
   
-  /**
-   * Build storage engine
-   */
   buildStorage(): IStorageEngine {
     if (this.dependencies) {
       return new LSMStore(this.config, this.dependencies);
@@ -82,17 +73,13 @@ export class ApplicationBuilder {
     if (this.factory) {
       return new LSMStore(this.config, {
         wal: this.factory.createWAL(),
-        memTable: this.factory.createMemTable(),
+        activeMemTable: this.factory.createMemTable(),
       });
     }
     
-    // Default: let LSMStore create its own dependencies
     return new LSMStore(this.config);
   }
   
-  /**
-   * Build HTTP server with storage engine
-   */
   buildHTTPServer(store: IStorageEngine, port: number): HTTPServer {
     return new HTTPServer(store, port);
   }

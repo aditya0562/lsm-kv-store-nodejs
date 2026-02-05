@@ -1,10 +1,3 @@
-/**
- * Configuration types and defaults for the storage engine.
- * 
- * Design: Centralized configuration allows easy tuning of system behavior
- * without code changes. Sync policies trade off durability vs throughput.
- */
-
 export enum SyncPolicy {
   /**
    * Sync after every write. Highest durability, lowest throughput (~1K writes/sec).
@@ -30,6 +23,12 @@ export interface StorageConfig {
   memTableSizeLimit: number;
   syncPolicy: SyncPolicy;
   httpPort: number;
+  
+  /** Enable background compaction (default: true) */
+  enableCompaction?: boolean;
+  
+  /** Compaction threshold - number of SSTables to trigger compaction */
+  compactionThreshold?: number;
 }
 
 export const DEFAULT_CONFIG: StorageConfig = {
@@ -37,4 +36,6 @@ export const DEFAULT_CONFIG: StorageConfig = {
   memTableSizeLimit: 4 * 1024 * 1024, // 4MB
   syncPolicy: SyncPolicy.GROUP_COMMIT_100MS,
   httpPort: 3000,
+  enableCompaction: true,
+  compactionThreshold: 4,
 };
