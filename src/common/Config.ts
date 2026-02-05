@@ -14,6 +14,7 @@ export interface StorageConfig {
   memTableSizeLimit: number;
   syncPolicy: SyncPolicy;
   httpPort: number;
+  tcpPort: number;
   enableCompaction?: boolean;
   compactionThreshold?: number;
   sstableTuning?: Partial<SSTableTuning>;
@@ -29,6 +30,7 @@ export const DEFAULT_CONFIG: StorageConfig = {
   memTableSizeLimit: 4 * 1024 * 1024,
   syncPolicy: SyncPolicy.GROUP_COMMIT_100MS,
   httpPort: 3000,
+  tcpPort: 3001,
   enableCompaction: true,
   compactionThreshold: 4,
 };
