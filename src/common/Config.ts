@@ -1,3 +1,4 @@
+import { ReplicationConfig } from '../replication/ReplicationTypes';
 export enum SyncPolicy {
   SYNC_EVERY_WRITE = 'sync_every_write',
   GROUP_COMMIT_100MS = 'group_commit_100ms',
@@ -18,6 +19,7 @@ export interface StorageConfig {
   enableCompaction?: boolean;
   compactionThreshold?: number;
   sstableTuning?: Partial<SSTableTuning>;
+  replication?: ReplicationConfig | undefined;
 }
 
 export const DEFAULT_SSTABLE_TUNING: SSTableTuning = {

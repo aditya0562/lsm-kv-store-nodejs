@@ -4,18 +4,20 @@ import { LogEntry, LogOperationType } from './LogEntry';
 import { SyncPolicy } from '../../common/Config';
 import { IWAL } from '../../interfaces/Storage';
 
+export type WALEntryListener = (entry: LogEntry) => void;
+
+export interface WALConfig {
+  readonly logDir: string;
+  readonly syncPolicy: SyncPolicy;
+  readonly onEntryAppended?: WALEntryListener | undefined;
+}
+
 interface PendingWrite {
   entry: LogEntry;
   resolve: () => void;
   reject: (err: Error) => void;
 }
 
-/**
- * Simple async mutex for serializing writes and checkpoint operations.
- * Prevents race conditions between concurrent writes and checkpoint.
- * 
- * Design: FIFO queue ensures fairness - waiters are served in order.
- */
 class AsyncMutex {
   private locked = false;
   private readonly waitQueue: Array<() => void> = [];
@@ -47,15 +49,17 @@ export class WAL implements IWAL {
   private fileHandle: fs.FileHandle | null = null;
   private sequenceId: number = 0;
   private readonly syncPolicy: SyncPolicy;
+  private readonly onEntryAppended?: WALEntryListener | undefined;
   
   private pendingWrites: PendingWrite[] = [];
   private flushTimer: NodeJS.Timeout | null = null;
   
   private readonly writeLock = new AsyncMutex();
   
-  constructor(logDir: string, syncPolicy: SyncPolicy) {
-    this.logDir = logDir;
-    this.syncPolicy = syncPolicy;
+  constructor(config: WALConfig) {
+    this.logDir = config.logDir;
+    this.syncPolicy = config.syncPolicy;
+    this.onEntryAppended = config.onEntryAppended;
   }
   
   async open(): Promise<void> {
@@ -98,6 +102,7 @@ export class WAL implements IWAL {
           throw new Error('WAL file handle not open');
         }
         await this.fileHandle.sync();
+        this.notifyListener(logEntry);
       } finally {
         this.writeLock.release();
       }
@@ -139,8 +144,9 @@ export class WAL implements IWAL {
       }
       await this.fileHandle.sync();
       
-      for (const { resolve } of batch) {
+      for (const { entry, resolve } of batch) {
         resolve();
+        this.notifyListener(entry);
       }
     } catch (err) {
       for (const { reject } of batch) {
@@ -158,12 +164,6 @@ export class WAL implements IWAL {
     await this.fileHandle.write(buffer);
   }
   
-  /**
-   * Replay all entries from WAL (crash recovery)
-   * 
-   * Design: Reads all log files in order and returns entries. Stops at
-   * first checksum failure (corrupted tail) to prevent reading garbage.
-   */
   async replay(): Promise<LogEntry[]> {
     const entries: LogEntry[] = [];
     const files = await fs.readdir(this.logDir);
@@ -178,12 +178,6 @@ export class WAL implements IWAL {
     return entries;
   }
   
-  /**
-   * Read all entries from a log file
-   * 
-   * Error Handling: Stops at first corruption (checksum failure) to prevent
-   * reading garbage data.
-   */
   private async readLogFile(filePath: string): Promise<LogEntry[]> {
     const entries: LogEntry[] = [];
     const fd = await fs.open(filePath, 'r');
@@ -229,15 +223,6 @@ export class WAL implements IWAL {
     return entries;
   }
   
-  /**
-   * Checkpoint - delete old WAL files after successful flush to SSTable
-   * 
-   * Design: Called after MemTable flush to SSTable. Old WAL files can be
-   * safely deleted since data is now persisted in SSTables.
-   * 
-   * Thread safety: Acquires writeLock to prevent concurrent writes
-   * while rotating the log file. This ensures no write sees a closed handle.
-   */
   async checkpoint(): Promise<void> {
     await this.writeLock.acquire();
     
@@ -274,7 +259,6 @@ export class WAL implements IWAL {
     }
   }
   
- 
   async close(): Promise<void> {
     if (this.pendingWrites.length > 0) {
       await this.flushBatch();
@@ -296,9 +280,19 @@ export class WAL implements IWAL {
     this.currentLogFile = path.join(this.logDir, `wal-${timestamp}.log`);
   }
   
+  private notifyListener(entry: LogEntry): void {
+    if (this.onEntryAppended) {
+      try {
+        this.onEntryAppended(entry);
+      } catch (err) {
+        console.warn(`WAL: Listener error: ${(err as Error).message}`);
+      }
+    }
+  }
+  
   private serializeEntry(entry: LogEntry): Buffer {
     const payload = this.serializePayload(entry);
-    const entrySize = 4 + 8 + 8 + 1 + payload.length; // checksum + seq + ts + op + payload
+    const entrySize = 4 + 8 + 8 + 1 + payload.length;
     const buffer = Buffer.allocUnsafe(4 + entrySize);
     
     let offset = 0;
@@ -457,12 +451,6 @@ export class WAL implements IWAL {
     }
   }
   
-  /**
-   * Calculate CRC32 checksum for corruption detection
-   * 
-   * Design: CRC32 provides fast checksum calculation with error detection.
-   * 
-   */
   private calculateChecksum(buffer: Buffer): number {
     let crc = 0xFFFFFFFF;
     for (let i = 0; i < buffer.length; i++) {

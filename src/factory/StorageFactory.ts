@@ -30,7 +30,10 @@ export class DefaultStorageFactory implements IStorageFactory {
   
   createWAL(): IWAL {
     const walDir = path.join(this.config.dataDir, 'wal');
-    return new WAL(walDir, this.config.syncPolicy);
+    return new WAL({
+      logDir: walDir,
+      syncPolicy: this.config.syncPolicy,
+    });
   }
   
   createMemTable(): IMemTable {

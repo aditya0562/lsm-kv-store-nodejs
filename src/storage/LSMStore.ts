@@ -6,7 +6,7 @@
 
 import * as fs from 'fs/promises';
 import * as path from 'path';
-import { WAL } from './wal/WAL';
+import { WAL, WALEntryListener } from './wal/WAL';
 import { LogOperationType, LogEntry } from './wal/LogEntry';
 import { MemTable } from './memtable/MemTable';
 import { StorageConfig, SSTableTuning, resolveSSTableTuning } from '../common/Config';
@@ -28,10 +28,11 @@ import {
 } from '../engine/compaction';
 
 export interface LSMStoreDependencies {
-  wal: IWAL;
-  activeMemTable: IMemTable;
-  manifest: IManifest;
+  wal?: IWAL;
+  activeMemTable?: IMemTable;
+  manifest?: IManifest;
   compactionManager?: ICompactionManager;
+  onWALEntryAppended?: WALEntryListener | undefined;
 }
 
 interface SSTableState {
@@ -63,14 +64,18 @@ export class LSMStore implements IStorageEngine {
    * @param config - Storage configuration
    * @param dependencies - Optional injected dependencies (for testing)
    */
-  constructor(config: StorageConfig, dependencies?: Partial<LSMStoreDependencies>) {
+  constructor(config: StorageConfig, dependencies?: LSMStoreDependencies) {
     this.config = config;
     this.sstableDir = path.join(config.dataDir, 'sstables');
     this.sstableTuning = resolveSSTableTuning(config.sstableTuning);
     this.useCompaction = config.enableCompaction !== false;
     
     const walDir = path.join(config.dataDir, 'wal');
-    this.wal = dependencies?.wal ?? new WAL(walDir, config.syncPolicy);
+    this.wal = dependencies?.wal ?? new WAL({
+      logDir: walDir,
+      syncPolicy: config.syncPolicy,
+      onEntryAppended: dependencies?.onWALEntryAppended,
+    });
     this.activeMemTable = dependencies?.activeMemTable ?? new MemTable(config.memTableSizeLimit);
     this.manifest = dependencies?.manifest ?? new Manifest(config.dataDir);
     
@@ -519,6 +524,32 @@ export class LSMStore implements IStorageEngine {
       throw new Error('Compaction manager not available');
     }
     return this.compactionManager.triggerCompaction();
+  }
+
+  public async applyReplicatedEntry(entry: LogEntry): Promise<void> {
+    this.ensureInitialized();
+    
+    const walEntry: Omit<LogEntry, 'sequenceId' | 'timestamp'> = {
+      operation: entry.operation,
+    };
+    
+    if (entry.key !== undefined) {
+      (walEntry as { key: string }).key = entry.key;
+    }
+    if (entry.value !== undefined) {
+      (walEntry as { value: string }).value = entry.value;
+    }
+    if (entry.keys !== undefined) {
+      (walEntry as { keys: string[] }).keys = entry.keys;
+    }
+    if (entry.values !== undefined) {
+      (walEntry as { values: string[] }).values = entry.values;
+    }
+    
+    await this.wal.append(walEntry);
+
+    this.applyLogEntry(entry);
+    this.maybeFlush();
   }
 
   private memTableRangeToMergeEntries(
