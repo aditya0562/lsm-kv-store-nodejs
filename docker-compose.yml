@@ -1,0 +1,71 @@
+services:
+
+  # ──────────────────────────────────────────────────────────────
+  # 1. Standalone Mode
+  #    docker compose up standalone
+  # ──────────────────────────────────────────────────────────────
+  standalone:
+    build: .
+    ports:
+      - "3000:3000"
+      - "3001:3001"
+    volumes:
+      - standalone-data:/app/data
+
+  # ──────────────────────────────────────────────────────────────
+  # 2. Replication Mode (Primary + Backup)
+  #    docker compose up primary backup
+  # ──────────────────────────────────────────────────────────────
+  backup:
+    build: .
+    ports:
+      - "4000:4000"
+      - "4001:4001"
+    volumes:
+      - backup-data:/app/data
+    command: >
+      node dist/index.js
+      --role=backup
+      --replication-port=4002
+      --http-port=4000
+      --tcp-port=4001
+
+  primary:
+    build: .
+    ports:
+      - "3000:3000"
+      - "3001:3001"
+    volumes:
+      - primary-data:/app/data
+    depends_on:
+      backup:
+        condition: service_started
+    command: >
+      node dist/index.js
+      --role=primary
+      --backup-host=backup
+      --backup-port=4002
+      --http-port=3000
+      --tcp-port=3001
+
+  # ──────────────────────────────────────────────────────────────
+  # 3. Tests
+  #    docker compose run test-api
+  #    docker compose run test-replication
+  # ──────────────────────────────────────────────────────────────
+  test-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    command: npx ts-node tests/integration/api-test.ts
+
+  test-replication:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    command: npx ts-node tests/integration/replication-test.ts
+
+volumes:
+  standalone-data:
+  primary-data:
+  backup-data:

@@ -1,0 +1,10 @@
+node_modules
+dist
+data
+data-*
+*.log
+.git
+.gitignore
+.env
+docs
+postman
