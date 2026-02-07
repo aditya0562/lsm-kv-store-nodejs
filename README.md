@@ -1,4 +1,4 @@
-# Moniepoint KV Store
+# LSM KV Store
 
 A network-available persistent Key/Value store built on **LSM Tree** architecture using **Node.js** and **TypeScript** with zero external runtime dependencies.
 
