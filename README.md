@@ -1,6 +1,8 @@
 # LSM KV Store
 
-A network-available persistent Key/Value store built on **LSM Tree** architecture using **Node.js** and **TypeScript** with zero external runtime dependencies.
+A network-available persistent Key/Value store built on **LSM Tree** architecture with zero external runtime dependencies.
+
+**Tech Stack:** Node.js · TypeScript
 
 ## Features
 
@@ -14,6 +16,8 @@ A network-available persistent Key/Value store built on **LSM Tree** architectur
 
 ### Option A: Docker (recommended)
 
+Requires [Docker](https://docs.docker.com/get-docker/).
+
 ```bash
 docker compose up standalone
 ```
@@ -22,7 +26,7 @@ Server is ready at `http://localhost:3000`. Skip to [Usage](#usage).
 
 ### Option B: Local
 
-Requires Node.js 20+.
+Requires [Node.js](https://nodejs.org/) 20+ (includes npm).
 
 ```bash
 npm install
@@ -237,7 +241,3 @@ src/
 ├── replication/              Primary-Backup replication (manager, server, protocol)
 └── factory/                  Abstract factory for storage components
 ```
-
-## License
-
-MIT
